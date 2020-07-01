@@ -472,6 +472,36 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	for si := 0; si < cfg.n; si++ {
+		starts = (starts + 1) % cfg.n
+		var rf *Raft
+		cfg.mu.Lock()
+		if cfg.connected[starts] {
+			rf = cfg.rafts[starts]
+		}
+		cfg.mu.Unlock()
+		if rf != nil {
+			term, isleader := rf.GetState()
+			DPrintf2("(%d)[term %d] alive, isleader=%t", rf.me, term, isleader)
+			for _, log := range rf.logs{
+				v, ok := (log.Command).(int)
+				if ok {
+					DPrintf2("--Server side-- index[%d],term[%d],command[%d]", log.LogIndex, log.LogTerm, v)
+				} else {
+
+				}
+
+			}
+			for ind, log := range cfg.logs[rf.me]{
+				l, ok := log.(int)
+				if ok {
+					DPrintf2("--Client side-- index[%d],command[%d]", ind, l)
+				} else {
+
+				}
+			}
+		}
+	}
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }
