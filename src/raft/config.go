@@ -179,6 +179,7 @@ func (cfg *config) start1(i int) {
 						// some server has already committed a different value for this entry!
 						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 							m.CommandIndex, i, m.Command, j, old)
+						cfg.printServerInfo()
 					}
 				}
 				_, prevok := cfg.logs[i][m.CommandIndex-1]
@@ -472,36 +473,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	for si := 0; si < cfg.n; si++ {
-		starts = (starts + 1) % cfg.n
-		var rf *Raft
-		cfg.mu.Lock()
-		if cfg.connected[starts] {
-			rf = cfg.rafts[starts]
-		}
-		cfg.mu.Unlock()
-		if rf != nil {
-			term, isleader := rf.GetState()
-			DPrintf2("(%d)[term %d] alive, isleader=%t", rf.me, term, isleader)
-			for _, log := range rf.logs{
-				v, ok := (log.Command).(int)
-				if ok {
-					DPrintf2("--Server side-- index[%d],term[%d],command[%d]", log.LogIndex, log.LogTerm, v)
-				} else {
-
-				}
-
-			}
-			for ind, log := range cfg.logs[rf.me]{
-				l, ok := log.(int)
-				if ok {
-					DPrintf2("--Client side-- index[%d],command[%d]", ind, l)
-				} else {
-
-				}
-			}
-		}
-	}
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }
@@ -535,5 +506,36 @@ func (cfg *config) end() {
 
 		fmt.Printf("  ... Passed --")
 		fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
+	}
+}
+
+func (cfg *config) printServerInfo() {
+	starts := 0
+	for si := 0; si < cfg.n; si++ {
+		starts = (starts + 1) % cfg.n
+		var rf *Raft
+		rf = cfg.rafts[starts]
+		if rf != nil {
+			term, isleader := rf.GetState()
+			DPrintf2("(%d)[term %d] alive, isleader=%t", rf.me, term, isleader)
+			DPrintf2("commitedIndex=%d, lastLogIndex=%d, logs'len=%d",rf.commitIndex, rf.lastLogIndex, len(rf.logs))
+			for _, log := range rf.logs{
+				v, ok := (log.Command).(int)
+				if ok {
+					DPrintf2("--Server side-- index[%d],term[%d],command[%d]", log.LogIndex, log.LogTerm, v)
+				} else {
+
+				}
+
+			}
+			for ind, log := range cfg.logs[rf.me]{
+				l, ok := log.(int)
+				if ok {
+					DPrintf2("--Client side-- index[%d],command[%d]", ind, l)
+				} else {
+
+				}
+			}
+		}
 	}
 }

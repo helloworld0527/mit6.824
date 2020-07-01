@@ -438,12 +438,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 			rf.matchIndex[server] = prevLogInd + entryLen
 		}
 		if rf.canCommit(prevLogInd + entryLen) {			// check whether the logs have existed in a majority of servers
-			if prevLogInd + entryLen > rf.commitIndex {
-				DPrintf("(info) (%d) commit index from [%d] to [%d]", rf.me, rf.commitIndex, prevLogInd+entryLen)
-				rf.commitIndex = prevLogInd + entryLen
-				rf.applyNotify <- struct{}{}
-			}
+			DPrintf("(info) (%d) commit index from [%d] to [%d]", rf.me, rf.commitIndex, prevLogInd+entryLen)
+			rf.commitIndex = prevLogInd + entryLen
 			rf.persist()
+			rf.applyNotify <- struct{}{}
 		}
 	} else {
 		if reply.Term > rf.currentTerm { 					// the leader is out of date
@@ -499,15 +497,18 @@ func (rf *Raft) applyToService() {
 //
 func (rf *Raft) canCommit(index int) bool {
 	result := false
-	count := 0
-	majorityNum := len(rf.peers) / 2 + 1
-	for i := 0; i < len(rf.peers); i++ {
-		if rf.matchIndex[i] >= index {
-			count++
+	// the new leader cannot commit logs from old term in terms of counting the number of replicas
+	if index <= rf.lastLogIndex && index > rf.commitIndex && rf.logs[index].LogTerm == rf.currentTerm {
+		count := 0
+		majorityNum := len(rf.peers) / 2 + 1
+		for i := 0; i < len(rf.peers); i++ {
+			if rf.matchIndex[i] >= index {
+				count++
+			}
 		}
-	}
-	if count >= majorityNum {
-		result = true
+		if count >= majorityNum {
+			result = true
+		}
 	}
 	return result
 }
@@ -538,8 +539,6 @@ func (rf *Raft) HandleAppendEntries(args *AppendEntriesArgs, reply *AppendEntrie
 					curInd -= 1
 				}
 				reply.HintIndex = curInd
-				rf.logs = rf.logs[:curInd] 					// delete conflicting entry and all that follow it
-				rf.lastLogIndex = curInd - 1
 			} else {
 				logLen := len(rf.logs)
 				for _, e := range args.Entries {			// append entries
