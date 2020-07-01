@@ -14,3 +14,11 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# log
+*.log
+**/log
+
+# test shell
+*.sh
+**/shell
