@@ -408,14 +408,9 @@ func (rf *Raft) sendAppendEntries(server int) {
 		rf.currentTerm,
 		rf.me,
 		rf.nextIndex[server] - 1,
-		0,
+		rf.logs[rf.nextIndex[server]-1].LogTerm,
 		[]LogEntry{},
 		rf.commitIndex,
-	}
-	if rf.nextIndex[server]-1 >= len(rf.logs) || rf.nextIndex[server]-1 < 0{
-		DPrintf("(error) the index is [%d], however the log's len is [%d]", rf.nextIndex[server]-1, len(rf.logs))
-	} else {
-		args.PrevLogTerm = rf.logs[rf.nextIndex[server]-1].LogTerm
 	}
 	for j := rf.nextIndex[server]; j <= rf.lastLogIndex; j++ {
 		args.Entries = append(args.Entries, rf.logs[j])
@@ -535,22 +530,27 @@ func (rf *Raft) HandleAppendEntries(args *AppendEntriesArgs, reply *AppendEntrie
 				success = false 							// conflicts, same index but different terms
 				curTerm := rf.logs[args.PrevLogIndex].LogTerm
 				curInd := args.PrevLogIndex
-				for rf.logs[curInd-1].LogTerm == curTerm {	// find the first index in current conflicting term
+				for rf.logs[curInd-1].LogTerm == curTerm && curInd-1 > rf.commitIndex {	// find the first index in current conflicting term
 					curInd -= 1
 				}
 				reply.HintIndex = curInd
 			} else {
-				logLen := len(rf.logs)
-				for _, e := range args.Entries {			// append entries
-					ind := e.LogIndex
-					if ind < logLen {
-						if rf.logs[ind].LogTerm != e.LogTerm {
-							rf.logs[ind] = e
-						}
-					} else {
-						rf.logs = append(rf.logs, e)
+				prevLogIndex := args.PrevLogIndex
+				i := 0
+				for ; i < len(args.Entries); i++ {
+					if prevLogIndex+1+i > rf.lastLogIndex {
+						break
 					}
-					rf.lastLogIndex = ind
+					if rf.logs[prevLogIndex + 1 + i].LogTerm != args.Entries[i].LogTerm {
+						rf.lastLogIndex = prevLogIndex + i
+						truncationEndIndex := rf.lastLogIndex+1
+						rf.logs = append(rf.logs[:truncationEndIndex]) // delete any conflicting log entries
+						break
+					}
+				}
+				for ; i < len(args.Entries); i++ {
+					rf.logs = append(rf.logs, args.Entries[i])
+					rf.lastLogIndex += 1
 				}
 				DPrintf("(info) (%d) append log from [%d] to [%d]", rf.me, args.PrevLogIndex+1, args.PrevLogIndex+len(args.Entries))
 				if args.LeaderCommit > rf.commitIndex {
