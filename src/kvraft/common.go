@@ -13,6 +13,7 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
+	ReqNumber int64
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
@@ -20,14 +21,17 @@ type PutAppendArgs struct {
 
 type PutAppendReply struct {
 	Err Err
+	CurrentLeader int
 }
 
 type GetArgs struct {
 	Key string
+	ReqNumber int64
 	// You'll have to add definitions here.
 }
 
 type GetReply struct {
 	Err   Err
+	CurrentLeader int
 	Value string
 }
