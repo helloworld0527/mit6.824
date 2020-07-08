@@ -555,7 +555,7 @@ func (rf *Raft) HandleAppendEntries(args *AppendEntriesArgs, reply *AppendEntrie
 				DPrintf("(info) (%d) append log from [%d] to [%d]", rf.me, args.PrevLogIndex+1, args.PrevLogIndex+len(args.Entries))
 				if args.LeaderCommit > rf.commitIndex {
 					rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(rf.lastLogIndex)))
-					rf.applyNotify <- struct{}{}			// notify the routine to apply log to client
+					rf.applyNotify <- struct{}{}						// notify the routine to apply log to client
 				}
 			}
 		}
@@ -624,7 +624,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	close(rf.shutdown)

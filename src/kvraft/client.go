@@ -60,7 +60,23 @@ func (ck *Clerk) Get(key string) string {
 	leader := int(nrand()) % len(ck.servers)
 	useHint := false
 	for !done {
-		hint := ck.sendGetRPC(&done, leader, &args, &reply)
+		ok := false
+		hint := -1
+		t0 := time.Now()
+		for time.Since(t0) < RPCTimeoutInterval && !ok {
+			ok = ck.servers[leader].Call("KVServer.Get", &args, &reply)
+		}
+
+		if ok { 								// if ok=false, timeout
+			if reply.Err == OK || reply.Err == ErrNoKey{
+				done = true
+			} else if reply.Err == ErrWrongLeader {
+				hint = reply.CurrentLeader
+			} else {
+				DPrintf("(error) Clerk[Get]: reply.Err argument error")
+			}
+		}
+
 		if hint != -1 && !useHint{ 				// take turns to use random choosing and hint
 			leader = hint
 			useHint = true
@@ -70,25 +86,6 @@ func (ck *Clerk) Get(key string) string {
 		}
 	}
 	return reply.Value
-}
-
-func (ck *Clerk) sendGetRPC(done *bool, leader int, args *GetArgs, reply *GetReply) int {
-	ok := false
-	t0 := time.Now()
-	for time.Since(t0) < RPCTimeoutInterval && !ok {
-		ok = ck.servers[leader].Call("KVServer.Get", &args, &reply)
-	}
-	if !ok { 									// return because of timeout
-		return -1
-	}
-	if reply.Err == OK || reply.Err == ErrNoKey{
-		*done = true
-	} else if reply.Err == ErrWrongLeader {
-		return reply.CurrentLeader
-	} else {
-		DPrintf("(error) Clerk[Get]: reply.Err argument error")
-	}
-	return -1
 }
 
 //
@@ -108,7 +105,36 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		op,
 		ck.getUniqueReqNumber(),
 	}
+	reply := PutAppendReply{}
+	done := false
+	leader := int(nrand()) % len(ck.servers)
+	useHint := false
+	for !done {
+		ok := false
+		hint := -1
+		t0 := time.Now()
+		for time.Since(t0) < RPCTimeoutInterval && !ok {
+			ok = ck.servers[leader].Call("KVServer.PutAppend", &args, &reply)
+		}
 
+		if ok { 								// if ok=false, timeout
+			if reply.Err == OK || reply.Err == ErrNoKey{
+				done = true
+			} else if reply.Err == ErrWrongLeader {
+				hint = reply.CurrentLeader
+			} else {
+				DPrintf("(error) Clerk[Get]: reply.Err argument error")
+			}
+		}
+
+		if hint != -1 && !useHint{ 				// take turns to use random choosing and hint
+			leader = hint
+			useHint = true
+		} else { 								// random select another server
+			leader = int(nrand()) % len(ck.servers)
+			useHint = false
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

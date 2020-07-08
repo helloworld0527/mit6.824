@@ -7,9 +7,11 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
+const RaftTimeoutInterval = 3 * 1000 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -18,32 +20,109 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Number 	int64			// unique number for command
+	Key 	string
+	Value 	string
+	Kind 	string			// GET PUT APPEND
+}
+
+type replyNotify struct {
+	index int
+	term  int
+	value string
+	err   Err
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
+	mu      		sync.Mutex
+	me      		int
+	rf      		*raft.Raft
+	applyCh 		chan raft.ApplyMsg
+	dead    		int32 							// set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	shutdown 		chan struct{}					// notify when killed
+	maxraftstate 	int 							// snapshot if log grows this big
 
-	// Your definitions here.
+	database 		map[string]string 				// memory kv store
+	opCache			map[int64]struct{}				// record command executed
+	notifies		map[int]chan replyNotify		// notify the RPC handle to return the result to client, use log index as key
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	op := Op{
+		args.ReqNumber,
+		args.Key,
+		"",
+		GET,
+	}
+	err, currentLeader, value := kv.start(&op)
+	reply.Err = err
+	reply.CurrentLeader = currentLeader
+	reply.Value = value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	var kind string
+	if args.Op == "Put" {
+		kind = PUT
+	} else {
+		kind = APPEND
+	}
+	op := Op{
+		args.ReqNumber,
+		args.Key,
+		args.Value,
+		kind,
+	}
+	err, currentLeader, _ := kv.start(&op)
+	reply.Err = err
+	reply.CurrentLeader = currentLeader
+}
+
+//
+// submit a log to raft
+// commit successfully:
+// the server is alive, everything goes well
+// the server is alive, but not leader any more
+// - replyNotify.term == applyMsg.term
+// the server is down, but the log was committed by the next new leader
+// - need client to send the second request for the same command
+// the server is alive, but raft cannot reach agreement in time, but finally the log was committed
+// - timer timeout, need second request
+//
+// commit fail:
+// the server is alive, but the log was dropped by the new leader
+// - replyNotify.term != applyMsg.term
+// the server is down, the log was dropped by new leader
+// - need client to send the second request for the same command
+//
+// return Err, currentLeader, value
+//
+func (kv *KVServer) start(op *Op) (Err, int, string){
+	index, term, isLeader := kv.rf.Start(*op)
+	if !isLeader {
+		currentLeader := kv.rf.GetLeader()
+		return ErrWrongLeader, currentLeader, ""
+	}
+	kv.mu.Lock()
+	kv.notifies[index] = make(chan replyNotify, 1) 				// prevent deadlock
+	kv.mu.Unlock()
+
+	timer := time.After(RaftTimeoutInterval)
+	select {
+	case <- timer:
+		kv.mu.Lock()
+		delete(kv.notifies, index)
+		kv.mu.Unlock()
+		return ErrWrongLeader, kv.rf.GetLeader(), ""
+	case replyResult := <- kv.notifies[index]:
+		if replyResult.term == term {
+			return replyResult.err, kv.rf.GetLeader(), replyResult.value
+		} else {												// alive, but not leader any more
+			return ErrWrongLeader, kv.rf.GetLeader(), ""
+		}
+	}
 }
 
 //
@@ -59,12 +138,59 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
+	kv.mu.Lock()
+	close(kv.shutdown)
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) waitApply() {
+	for {
+		select {
+		case applyMsg := <- kv.applyCh:
+			kv.handleApply(&applyMsg)
+		case <-kv.shutdown:
+			return
+		}
+	}
+}
+
+func (kv *KVServer) handleApply(applyMsg *raft.ApplyMsg) {
+	var op Op
+	var ok bool
+	op, ok = applyMsg.Command.(Op)
+	if !ok {
+		DPrintf("(error) applyMsg.Command type error, not Op")
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	number := op.Number
+	_, done := kv.opCache[number]
+	notifyChan, needNotify := kv.notifies[applyMsg.CommandIndex]
+
+	if !needNotify && done { 				// has been executed and don't need to reply to the client
+		return
+	}
+
+	if !done {								// the command has not been executed
+		kv.opCache[number] = struct{}{}
+		switch op.Kind {
+		case GET:
+			value, hasKey := kv.database[op.Key]
+			if hasKey {
+				
+			}
+		}
+	}
+
+	if needNotify {							// need to reply
+
+	}
 }
 
 //
@@ -90,12 +216,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.shutdown = make(chan struct{})
+	kv.database = make(map[string]string)
+	kv.opCache = make(map[int64]struct{})
 
-	// You may need initialization code here.
+	go kv.waitApply()
 
 	return kv
 }
