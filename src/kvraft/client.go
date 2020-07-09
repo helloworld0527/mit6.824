@@ -2,18 +2,21 @@ package kvraft
 
 import (
 	"../labrpc"
-	"sync"
 	"time"
 )
 import "crypto/rand"
 import "math/big"
 
-const RPCTimeoutInterval = 5 * 1000 * time.Millisecond
+const RPCTimeoutInterval = 1 * 1000 * time.Millisecond
 
+//
+// a single clerk only send one RPC to server at a time, so it won't need concurrent lock
+//
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	mu sync.Mutex
-	reqNumber int64
+	servers 	[]*labrpc.ClientEnd
+	reqNumber 	int64					// global request sequence number
+	leader		int						// record current leader
+	id 			int64					// identify client
 }
 
 func nrand() int64 {
@@ -27,12 +30,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.reqNumber = 0
+	ck.leader = 0
+	ck.id = nrand()
 	return ck
 }
 
 func (ck *Clerk) getUniqueReqNumber() int64 {
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
 	result := ck.reqNumber
 	ck.reqNumber++
 	return  result
@@ -54,15 +57,14 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
 		key,
 		ck.getUniqueReqNumber(),
+		ck.id,
 	}
-	reply := GetReply{}
 	done := false
-	leader := int(nrand()) % len(ck.servers)
-	useHint := false
+	leader := ck.leader
 	for !done {
 		ok := false
-		hint := -1
 		t0 := time.Now()
+		reply := GetReply{}
 		for time.Since(t0) < RPCTimeoutInterval && !ok {
 			ok = ck.servers[leader].Call("KVServer.Get", &args, &reply)
 		}
@@ -70,22 +72,13 @@ func (ck *Clerk) Get(key string) string {
 		if ok { 								// if ok=false, timeout
 			if reply.Err == OK || reply.Err == ErrNoKey{
 				done = true
-			} else if reply.Err == ErrWrongLeader {
-				hint = reply.CurrentLeader
-			} else {
-				DPrintf("(error) Clerk[Get]: reply.Err argument error")
+				ck.leader = leader
+				return reply.Value
 			}
 		}
-
-		if hint != -1 && !useHint{ 				// take turns to use random choosing and hint
-			leader = hint
-			useHint = true
-		} else { 								// random select another server
-			leader = int(nrand()) % len(ck.servers)
-			useHint = false
-		}
+		leader = (leader+1) % len(ck.servers)
 	}
-	return reply.Value
+	return ""
 }
 
 //
@@ -104,15 +97,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		value,
 		op,
 		ck.getUniqueReqNumber(),
+		ck.id,
 	}
-	reply := PutAppendReply{}
 	done := false
-	leader := int(nrand()) % len(ck.servers)
-	useHint := false
+	leader := ck.leader
 	for !done {
 		ok := false
-		hint := -1
 		t0 := time.Now()
+		reply := PutAppendReply{}
 		for time.Since(t0) < RPCTimeoutInterval && !ok {
 			ok = ck.servers[leader].Call("KVServer.PutAppend", &args, &reply)
 		}
@@ -120,20 +112,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if ok { 								// if ok=false, timeout
 			if reply.Err == OK || reply.Err == ErrNoKey{
 				done = true
-			} else if reply.Err == ErrWrongLeader {
-				hint = reply.CurrentLeader
-			} else {
-				DPrintf("(error) Clerk[Get]: reply.Err argument error")
+				ck.leader = leader
+				return
 			}
 		}
-
-		if hint != -1 && !useHint{ 				// take turns to use random choosing and hint
-			leader = hint
-			useHint = true
-		} else { 								// random select another server
-			leader = int(nrand()) % len(ck.servers)
-			useHint = false
-		}
+		leader = (leader+1) % len(ck.servers)
 	}
 }
 

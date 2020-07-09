@@ -20,13 +20,20 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+//
+// operation command from client
+//
 type Op struct {
-	Number 	int64			// unique number for command
-	Key 	string
-	Value 	string
-	Kind 	string			// GET PUT APPEND
+	Number 		int64			// unique number for command
+	Key 		string
+	Value 		string
+	Kind 		string			// GET PUT APPEND
+	ClientId 	int64			// indicate the command coming from which client
 }
 
+//
+// to notify the RPCHandle return result to client
+//
 type replyNotify struct {
 	index int
 	term  int
@@ -34,6 +41,11 @@ type replyNotify struct {
 	err   Err
 }
 
+//
+// opCache: for a specific client, the command sequence number it sends will increase monotonically,
+// a client won't call next RPC until the previous one return, but several clients could send RPC concurrently
+// notifies:
+//
 type KVServer struct {
 	mu      		sync.Mutex
 	me      		int
@@ -45,7 +57,7 @@ type KVServer struct {
 	maxraftstate 	int 							// snapshot if log grows this big
 
 	database 		map[string]string 				// memory kv store
-	opCache			map[int64]struct{}				// record command executed
+	opCache			map[int64]int64					// key: clientId, value: the latest request number has been executed
 	notifies		map[int]chan replyNotify		// notify the RPC handle to return the result to client, use log index as key
 }
 
@@ -55,10 +67,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		args.Key,
 		"",
 		GET,
+		args.ClientId,
 	}
-	err, currentLeader, value := kv.start(&op)
+	err, value := kv.start(&op)
 	reply.Err = err
-	reply.CurrentLeader = currentLeader
 	reply.Value = value
 }
 
@@ -74,10 +86,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		args.Key,
 		args.Value,
 		kind,
+		args.ClientId,
 	}
-	err, currentLeader, _ := kv.start(&op)
+	err, _ := kv.start(&op)
 	reply.Err = err
-	reply.CurrentLeader = currentLeader
 }
 
 //
@@ -97,13 +109,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // the server is down, the log was dropped by new leader
 // - need client to send the second request for the same command
 //
-// return Err, currentLeader, value
+// return Err, value
 //
-func (kv *KVServer) start(op *Op) (Err, int, string){
+func (kv *KVServer) start(op *Op) (Err, string){
 	index, term, isLeader := kv.rf.Start(*op)
 	if !isLeader {
-		currentLeader := kv.rf.GetLeader()
-		return ErrWrongLeader, currentLeader, ""
+		return ErrWrongLeader, ""
 	}
 	kv.mu.Lock()
 	kv.notifies[index] = make(chan replyNotify, 1) 				// prevent deadlock
@@ -115,12 +126,12 @@ func (kv *KVServer) start(op *Op) (Err, int, string){
 		kv.mu.Lock()
 		delete(kv.notifies, index)
 		kv.mu.Unlock()
-		return ErrWrongLeader, kv.rf.GetLeader(), ""
+		return ErrWrongLeader, ""
 	case replyResult := <- kv.notifies[index]:
 		if replyResult.term == term {
-			return replyResult.err, kv.rf.GetLeader(), replyResult.value
+			return replyResult.err, replyResult.value
 		} else {												// alive, but not leader any more
-			return ErrWrongLeader, kv.rf.GetLeader(), ""
+			return ErrWrongLeader, ""
 		}
 	}
 }
@@ -169,27 +180,46 @@ func (kv *KVServer) handleApply(applyMsg *raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	number := op.Number
-	_, done := kv.opCache[number]
+	clientId := op.ClientId
+	if _, ok = kv.opCache[clientId]; !ok{
+		kv.opCache[clientId] = -1
+	}
 	notifyChan, needNotify := kv.notifies[applyMsg.CommandIndex]
 
-	if !needNotify && done { 				// has been executed and don't need to reply to the client
+	if !needNotify && op.Number <= kv.opCache[clientId] { 	// has been executed and don't need to reply to the client
 		return
 	}
 
-	if !done {								// the command has not been executed
-		kv.opCache[number] = struct{}{}
+	replyNoti := replyNotify{
+		applyMsg.CommandIndex,
+		applyMsg.CommandTerm,
+		"",
+		OK,
+	}
+	if op.Kind == GET {										// GET is idempotent, can execute repeatedly
+		if value, hasKey := kv.database[op.Key]; hasKey {
+			replyNoti.value = value
+		} else {
+			replyNoti.err = ErrNoKey
+		}
+	}
+	if op.Number > kv.opCache[clientId] {					// the command has not been executed (PUT/APPEND)
+		kv.opCache[clientId] = op.Number
 		switch op.Kind {
-		case GET:
-			value, hasKey := kv.database[op.Key]
-			if hasKey {
-				
+		case PUT:
+			kv.database[op.Key] = op.Value
+		case APPEND:
+			if _, hasKey := kv.database[op.Key]; hasKey {
+				kv.database[op.Key] += op.Value
+			} else {
+				kv.database[op.Key] = op.Value
 			}
 		}
 	}
 
-	if needNotify {							// need to reply
-
+	if needNotify {											// need to reply
+		delete(kv.notifies, applyMsg.CommandIndex)			// delete the item, as it has been dealt with
+		notifyChan <- replyNoti
 	}
 }
 
@@ -216,11 +246,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 100)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.shutdown = make(chan struct{})
 	kv.database = make(map[string]string)
-	kv.opCache = make(map[int64]struct{})
+	kv.opCache = make(map[int64]int64)
+	kv.notifies = make(map[int]chan replyNotify)
 
 	go kv.waitApply()
 
